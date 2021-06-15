@@ -21,10 +21,11 @@
 #include "drivers/hall.h"
 #include "drivers/callback_timers.h"
 #include "lib/utils.h"
+#include "lib/circular_buffer.h"
 #include "torque_regulator.h"
 #include "math.h"
 #include "stdlib.h"
-
+//#include "../CMSIS/core/arm_math.h"
 
 // for FFT functions
 #include "stdio.h"
@@ -54,8 +55,15 @@ typedef double complex cplx;
 #define WALL_ANGLE_POS 15.f
 #define WALL_ANGLE_NEG -15.f
 
-#define N_SAMPLES 1024 //need to be a power of 2
+#define N_SAMPLES 128 //need to be a power of 2
 #define WINDOW_SIZE 50 //Moving average of the standard deviation
+#define ONE_OVER_WINDOW_SIZE 0.02f
+
+#define A0 0.9989f
+#define A1 -1.9857f
+#define A2 0.9989f
+#define B1 1.9854f
+#define B2 -0.9975f
 
 volatile uint32_t hapt_timestamp; // Time base of the controller, also used to timestamp the samples sent by streaming [us].
 volatile float32_t hapt_hallVoltage; // Hall sensor output voltage [V].
@@ -75,8 +83,18 @@ volatile float32_t wall_B;
 
 volatile bool fft_on;
 volatile bool std_on;
+volatile bool notch_filter;
+
 volatile float32_t muscle_value[N_SAMPLES];
+volatile float32_t muscle_value_filt;
+volatile float32_t filtered_value_Prev;
+volatile float32_t filtered_value_Prev_Prev;
 volatile float32_t actual_value;
+
+volatile float32_t amplifier_value;
+volatile float32_t amplifier_value_Prev;
+volatile float32_t amplifier_value_Prev_Prev;
+
 
 volatile float32_t sum_value;
 volatile float32_t std_dev_value;
@@ -90,7 +108,10 @@ void hapt_Update(void);
 
 float32_t hapt_LowPassFilter(float32_t previousFilteredValue,
 							 float32_t input, float32_t dt,
-							 float32_t tau);
+							 float32_t cutoffFreq);
+
+float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,
+							 float32_t dt, float32_t cutoffFreq);
 
 void _fft(cplx buf[], cplx out[], uint32_t n, uint32_t step);
 void fft(cplx buf[], uint32_t n);
@@ -116,12 +137,18 @@ void hapt_Init(void)
 
 	fft_on = 0;
 	std_on = 0;
+	notch_filter = 0;
+
 	energy_fft = 0;
 	iteration = 0;
 	actual_value = 0.0f;
 
 	sum_value = 0.0f;
 	std_dev_value = 0.0f;
+	muscle_value_filt = 0.0f;
+	filtered_value_Prev = 0.0f;
+	filtered_value_Prev_Prev = 0.0f;
+
 
 
     // Make the timers call the update function periodically.
@@ -146,8 +173,7 @@ void hapt_Init(void)
     comm_monitorFloat("Actual value", (float32_t*)&actual_value, READONLY);
     comm_monitorBool("FFT on", (bool*)&fft_on, READWRITE);
     comm_monitorFloat("Energy FFT", (float32_t*)&energy_fft, READONLY);
-    comm_monitorBool("std on", (bool*)&std_on, READWRITE);
-    comm_monitorFloat("'Energy' std", (float32_t*)&energy_std, READONLY);
+    comm_monitorBool("Notch filter on", (bool*)&notch_filter, READWRITE);
 
 }
 
@@ -161,7 +187,7 @@ void hapt_Update()
 
 
 	// Get the value of the amplifier
-	float32_t amplifier_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
+	amplifier_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
 
 	// Compute the dt (uncomment if you need it).
 	float32_t dt = ((float32_t)cbt_GetHapticControllerPeriod()) / 1000000.0f; // [s].
@@ -185,110 +211,57 @@ void hapt_Update()
 
 
 	iteration = ((iteration + 1) % N_SAMPLES);
-//	muscle_value[iteration] = hapt_hallVoltage * (-25.78f) + 63.39f;
-	muscle_value[iteration] = amplifier_value;
-	actual_value = muscle_value[iteration];
+
+
+	if (fft_on == 0){
+		actual_value = amplifier_value;
+
+	}
 
 
 	if (fft_on == 1){
-		float32_t period = DEFAULT_HAPTIC_CONTROLLER_PERIOD * 10^-6;
-		float32_t Fs = 1/period;
-		float32_t df = Fs/N_SAMPLES;
-		float32_t freq_sampling[N_SAMPLES];
-		float32_t energy = 0;
+		float32_t mean = 0.0f;
+		float32_t filtered_value = 0.0f;
+		float32_t tmp = hapt_LowPassFilter(muscle_value_filt, amplifier_value,
+											dt, 500);
 
-		cplx fft_signal[N_SAMPLES];
-		cplx fft_signal_squared[N_SAMPLES];
+		muscle_value_filt = hapt_HighPassFilter(muscle_value_filt, tmp,
+												dt, 10);
 
-		for (uint32_t i = 0; i < N_SAMPLES; i++){
-			uint32_t j = (i + 1 + iteration) % N_SAMPLES;
-			freq_sampling[i] = Fs * i / N_SAMPLES;
-			fft_signal[i] = muscle_value[j];
+
+		//implement notch filter
+		if (notch_filter == 1){
+			filtered_value = A0 * amplifier_value + A1 * amplifier_value_Prev + A2 * amplifier_value_Prev_Prev + \
+							 B1 * filtered_value_Prev + B2 * filtered_value_Prev_Prev;
+
+			filtered_value_Prev = filtered_value;
+			filtered_value_Prev_Prev = filtered_value_Prev;
+
+			amplifier_value_Prev = amplifier_value;
+			amplifier_value_Prev_Prev = amplifier_value_Prev;
+
+		} else {
+			filtered_value = muscle_value_filt;
 		}
 
-		fft(fft_signal, N_SAMPLES);
+		muscle_value[iteration] = pow(filtered_value, 2);
+		actual_value = muscle_value[iteration];
 
-		for (uint32_t i = 0; i < N_SAMPLES; i++){
-			fft_signal_squared[i] =  creal((fft_signal[i]/Fs) * conj(fft_signal[i]/Fs));
-			if (freq_sampling[i] > 10 && freq_sampling[i] < 500){
-				// remove noisy peak at 150 Hz
-				if (!(freq_sampling[i] > 130 && freq_sampling[i] < 160)){
-					energy += fft_signal_squared[i];
-				}
-			}
-		}
 
-		energy_fft = 2*energy*df;
-	}
-
-	if (std_on == 1){
-		float32_t mean = 0.0;
-		float32_t SD = 0.0;
 
 		//add last value and remove value (WINDOW_SIZE + 1) before
 		sum_value += muscle_value[iteration];
 		sum_value -= muscle_value[(iteration - (WINDOW_SIZE + 1))% N_SAMPLES];
-		mean = sum_value / WINDOW_SIZE;
-
-		for (uint32_t i = 0; i < WINDOW_SIZE; i++) {
-			uint32_t j = (iteration + (i + 1) - WINDOW_SIZE) % N_SAMPLES;
-			SD += pow(muscle_value[j] - mean, 2);
-		}
-
-		energy_std = sqrt(SD / WINDOW_SIZE);
+		mean = sum_value * ONE_OVER_WINDOW_SIZE;
+		energy_fft = pow(mean, 0.5);
 
 
 
-//		float32_t sum = 0.0;
-//		float32_t SD = 0.0;
-//		float32_t std_signal[WINDOW_SIZE];
-//
-//		for (uint32_t i = 0; i < WINDOW_SIZE; i++) {
-//			uint32_t j = (iteration + (i + 1) - WINDOW_SIZE) % N_SAMPLES;
-//			std_signal[i] = muscle_value[j];
-//			sum += std_signal[i];
-//		}
-//		mean = sum / WINDOW_SIZE;
-//		for (uint32_t i = 0; i < WINDOW_SIZE; i++) {
-//			SD += pow(std_signal[i] - mean, 2);
-//		}
-//		energy_std = sqrt(SD / WINDOW_SIZE);
+
+
+
 
 	}
-
-
-
-
-//		cplx P2[N_SAMPLES];
-//		cplx P1[N_SAMPLES/2];
-//		cplx P1_smoothed[N_SAMPLES/2];
-
-//		for (int i = 0; i < N_SAMPLES; i++){
-//			P2[i] = abs(fft_signal[i]/N_SAMPLES);
-//		}
-//
-//		for (int i = 0; i < N_SAMPLES/2; i++){
-//			P1[i] = P2[i];
-//			if (i > 0 && i < (N_SAMPLES/2 - 1)){
-//				P1[i] *= 2;
-//			}
-//		}
-//
-//
-//
-//		uint32_t arrNumbers[WINDOW_SIZE] = {0};
-//	    uint32_t pos = 0;
-//	    cplx sum = 0;
-//	    uint32_t len = sizeof(arrNumbers) / sizeof(uint32_t);
-//
-//		for (int i = 0; i < N_SAMPLES/2; i++){
-//			P1_smoothed[i] = movingAvg(arrNumbers, &sum, pos, len, P1[i]);
-//		    pos++;
-//		    if (pos >= len){
-//		      pos = 0;
-//		    }
-//		}
-
 
 
 	// Compute the motor torque compensation, and apply it.
@@ -330,7 +303,7 @@ void hapt_Update()
 	if (hapt_compensation_on == 0  && wall_on == 0){
 		hapt_motorTorque = 0.0f;
 	}
-
+	hapt_motorTorque = 0.0f;
 
 	torq_SetTorque(hapt_motorTorque);
 	hapt_paddlePrevPos = hapt_paddleAngle;
@@ -353,6 +326,15 @@ float32_t hapt_LowPassFilter(float32_t previousFilteredValue, float32_t input,
 	float32_t alpha = dt / (tau+dt); // Smoothing factor.
 	return alpha * input + (1.0f - alpha) * previousFilteredValue;
 }
+
+float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,
+							 float32_t dt, float32_t cutoffFreq)
+{
+	float32_t tau = 1.0f / (2.0f * PI * cutoffFreq); // Rise time (time to reach 63% of the steady-state value).
+	float32_t alpha = tau / (tau+dt); // Smoothing factor.
+	return alpha * input + (1.0f - alpha) * previousFilteredValue;
+}
+
 
 
 void _fft(cplx buf[], cplx out[], uint32_t n, uint32_t step)

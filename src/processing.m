@@ -24,8 +24,8 @@ plot(bin_array/6)
 hold on;
 plot(moving_std)
 hold on;
-plot(moving_mean)
-
+% plot(moving_mean)
+legend("emg", "muscle ground truth","std on the last 50 sample")
 %% Moving energy (just to see the result)
 choice = -1;
 energy_values = [];
@@ -50,11 +50,14 @@ end
 % legend("moving std", "moving std smoothed", "energy")
 % 
 figure
+plot(moving_std/20)
+hold on
 plot(smoothdata(moving_std)/20)
 hold on
-plot(energy_values)
-hold on
-plot(energy_time_values)
+
+% plot(energy_values)
+% hold on
+% plot(energy_time_values)
 legend("moving std smoothed", "energy", "energy time domain")
 title("Energy vs moving std on weak force")
 
