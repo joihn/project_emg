@@ -25,7 +25,7 @@
 #include "torque_regulator.h"
 #include "math.h"
 #include "stdlib.h"
-//#include "../CMSIS/core/arm_math.h"
+//#include "arm_math.h"
 
 // for FFT functions
 #include "stdio.h"
@@ -55,9 +55,9 @@ typedef double complex cplx;
 #define WALL_ANGLE_POS 15.f
 #define WALL_ANGLE_NEG -15.f
 
-#define N_SAMPLES 128 //need to be a power of 2
-#define WINDOW_SIZE 50 //Moving average of the standard deviation
-#define ONE_OVER_WINDOW_SIZE 0.02f
+#define N_SAMPLES 1000 //need to be a power of 2
+#define WINDOW_SIZE 1000 //Moving average of the standard deviation
+//#define ONE_OVER_WINDOW_SIZE 0.02f
 
 #define A0 0.9989f
 #define A1 -1.9857f
@@ -75,7 +75,48 @@ volatile float32_t hapt_paddleAccel; // Paddle acceleration [deg/s^2].
 volatile float32_t hapt_paddlePrevPos; // Previous paddle angle [deg].
 volatile float32_t hapt_paddleSpeedFilt; // Filtered paddle speed [deg/s].
 
+volatile float32_t hapt_paddleSetAngle;
+
+volatile float32_t filtered_value ;
+
+volatile uint32_t hapt_timestamp; // Time base of the controller, also used to timestamp the samples sent by streaming [us].
+volatile float32_t hapt_hallVoltage; // Hall sensor output voltage [V].
+volatile float32_t hapt_encoderPaddleAngle; // Paddle angle measured by the incremental encoder [deg].
+volatile float32_t hapt_paddleAngle; // Paddle angle [deg].
+volatile float32_t hapt_paddleSpeed; // Paddle speed [deg/s].
+volatile float32_t hapt_paddleAccel; // Paddle acceleration [deg/s^2].
+volatile float32_t hapt_paddlePrevPos; // Previous paddle angle [deg].
+volatile float32_t hapt_paddlePrevSpeed; // Previous paddle speed [deg/s].
+volatile float32_t hapt_paddleAngleFilt; // Filtered paddle angle [deg].
+volatile float32_t hapt_paddleSpeedFilt; // Filtered paddle speed [deg/s].
+volatile float32_t hapt_paddleAccelFilt; // Filtered paddle acceleration [deg/s].
+volatile float32_t hapt_motorTorque; // Motor torque [N.m].
+
+
+
+
+volatile float32_t filterCutoffFreqAngle = 10.0f; // Cutoff frequency for the position filter [Hz].
 const float32_t filterCutoffFreqSpeed = 200.0f; // Cutoff frequency for the speed filter [Hz].
+const float32_t filterCutoffFreqAccel = 10.0f; // Cutoff frequency for the acceleration filter [Hz].
+
+
+
+volatile float32_t PID_kp = 0.015;	//0.01		0.022
+volatile float32_t PID_ki = 0.15;	//0.003		0.015
+volatile float32_t PID_kd = 0.0006; //0.0008	0.00055
+
+volatile float32_t PID_tau_i = 0.1;
+
+
+volatile float32_t PID_errorPos;
+volatile float32_t PID_errorPosPrev;
+volatile float32_t PID_integrator;
+volatile float32_t PID_derivative;
+
+
+
+volatile bool positionControl;
+
 volatile bool wall_on;
 volatile bool hapt_compensation_on;
 volatile float32_t wall_K;
@@ -87,6 +128,8 @@ volatile bool notch_filter;
 
 volatile float32_t muscle_value[N_SAMPLES];
 volatile float32_t muscle_value_filt;
+volatile float32_t muscleOutput;
+
 volatile float32_t filtered_value_Prev;
 volatile float32_t filtered_value_Prev_Prev;
 volatile float32_t actual_value;
@@ -100,6 +143,8 @@ volatile float32_t sum_value;
 volatile float32_t std_dev_value;
 
 volatile float32_t energy_fft;
+
+
 volatile float32_t energy_std;
 volatile uint32_t iteration;
 
@@ -112,6 +157,7 @@ float32_t hapt_LowPassFilter(float32_t previousFilteredValue,
 
 float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,
 							 float32_t dt, float32_t cutoffFreq);
+float32_t remapmine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat);
 
 void _fft(cplx buf[], cplx out[], uint32_t n, uint32_t step);
 void fft(cplx buf[], uint32_t n);
@@ -135,11 +181,12 @@ void hapt_Init(void)
 	wall_K = 0.005f; //go down to 0.00005 when no muscle force detected 	//0.01f;
 	wall_B = 0.0f; 															//0.003f;
 
-	fft_on = 0;
+	fft_on = 1;
 	std_on = 0;
-	notch_filter = 0;
+	notch_filter = 1;
 
 	energy_fft = 0;
+
 	iteration = 0;
 	actual_value = 0.0f;
 
@@ -149,7 +196,24 @@ void hapt_Init(void)
 	filtered_value_Prev = 0.0f;
 	filtered_value_Prev_Prev = 0.0f;
 
+    filtered_value = 0.0f;
+	///////////////PID
+    hapt_motorTorque = 0.0f;
+    hapt_paddlePrevPos = 0.0f;
+    hapt_paddlePrevSpeed = 0.0f;
+    hapt_paddleSpeedFilt = 0.0f;
+    hapt_paddleAccelFilt = 0.0f;
 
+    //hapt_PID_on = 0;
+    //hapt_HallSensor =  0;
+    hapt_paddleSetAngle = 0.0f;
+
+    PID_errorPos = 0.0f;
+    PID_errorPosPrev = 0.0f;
+    PID_integrator = 0.0f;
+    PID_derivative = 0.0f;
+    positionControl = 0;
+	///////////
 
     // Make the timers call the update function periodically.
     cbt_SetHapticControllerTimer(hapt_Update, DEFAULT_HAPTIC_CONTROLLER_PERIOD);
@@ -174,7 +238,10 @@ void hapt_Init(void)
     comm_monitorBool("FFT on", (bool*)&fft_on, READWRITE);
     comm_monitorFloat("Energy FFT", (float32_t*)&energy_fft, READONLY);
     comm_monitorBool("Notch filter on", (bool*)&notch_filter, READWRITE);
-
+    comm_monitorFloat("paddle_set_pos [deg]", (float32_t*)&hapt_paddleSetAngle, READWRITE);
+    comm_monitorBool("Position control", (bool*)&positionControl, READWRITE);
+    comm_monitorFloat("filtered_value", (float32_t*)&filtered_value, READONLY);
+    comm_monitorFloat("muscleOutput", (float32_t*)&muscleOutput, READONLY);
 }
 
 
@@ -221,7 +288,7 @@ void hapt_Update()
 
 	if (fft_on == 1){
 		float32_t mean = 0.0f;
-		float32_t filtered_value = 0.0f;
+		//float32_t filtered_value = 0.0f;
 		float32_t tmp = hapt_LowPassFilter(muscle_value_filt, amplifier_value,
 											dt, 500);
 
@@ -243,7 +310,7 @@ void hapt_Update()
 		} else {
 			filtered_value = muscle_value_filt;
 		}
-
+        filtered_value = filtered_value - 1.2283f; // detrending
 		muscle_value[iteration] = pow(filtered_value, 2);
 		actual_value = muscle_value[iteration];
 
@@ -252,20 +319,20 @@ void hapt_Update()
 		//add last value and remove value (WINDOW_SIZE + 1) before
 		sum_value += muscle_value[iteration];
 		sum_value -= muscle_value[(iteration - (WINDOW_SIZE + 1))% N_SAMPLES];
-		mean = sum_value * ONE_OVER_WINDOW_SIZE;
-		energy_fft = pow(mean, 0.5);
+		mean = sum_value / WINDOW_SIZE;
+		energy_fft = pow(mean, 0.5); //sqrt
+        //do some more processing on it
+        muscleOutput = hapt_LowPassFilter( muscleOutput,
+                                           energy_fft, dt,
+                                                  10);
 
 
 
-
-
-
-
-	}
+    }
 
 
 	// Compute the motor torque compensation, and apply it.
-	if (hapt_compensation_on == 1){
+	if (hapt_compensation_on ==1){
 		hapt_motorTorque=0;
 		//compensate for gravity
 		hapt_motorTorque += MGL * (float32_t)sin(hapt_paddleAngle * PI/180.f ) / REDUCTION_RATIO;
@@ -281,32 +348,94 @@ void hapt_Update()
 		}
 	}
 
-	// apply a virtual wall
-	if (wall_on == 1){
-		if(hapt_paddleAngle > WALL_ANGLE_POS){
-			hapt_motorTorque += wall_K*(WALL_ANGLE_POS - hapt_paddleAngle) - wall_B*hapt_paddleSpeedFilt;
-		} else if(hapt_paddleAngle < WALL_ANGLE_NEG){
-			hapt_motorTorque += wall_K*(WALL_ANGLE_NEG - hapt_paddleAngle) - wall_B*hapt_paddleSpeedFilt;
-		}
 
+
+	bool wall = 0;
+	if (wall) {        // apply a virtual wall
+        if (wall_on == 1) {
+            if (hapt_paddleAngle > WALL_ANGLE_POS) {
+                hapt_motorTorque += wall_K * (WALL_ANGLE_POS - hapt_paddleAngle) - wall_B * hapt_paddleSpeedFilt;
+            } else if (hapt_paddleAngle < WALL_ANGLE_NEG) {
+                hapt_motorTorque += wall_K * (WALL_ANGLE_NEG - hapt_paddleAngle) - wall_B * hapt_paddleSpeedFilt;
+            }
+
+        }
+
+        // saturation
+        if (hapt_motorTorque > NOMINAL_TORQUE) {
+            hapt_motorTorque = NOMINAL_TORQUE;
+        } else if (hapt_motorTorque < -1 * NOMINAL_TORQUE) {
+            hapt_motorTorque = -1 * NOMINAL_TORQUE;
+        }
+
+        // No torque applied
+        if (hapt_compensation_on ==10 && wall_on == 0) {
+            hapt_motorTorque = 0.0f;
+        }
+    }
+
+	if (positionControl){
+
+
+
+        hapt_paddleSetAngle = remapmine(muscleOutput, 0.007f, 0.15f, -22.0f, +22.0f, true);
+
+	    /// filtering
+        hapt_paddleAngleFilt = hapt_LowPassFilter(hapt_paddleAngleFilt,
+                                                  hapt_paddleAngle, dt,
+                                                  filterCutoffFreqAngle);
+
+        hapt_paddleSpeed = (hapt_paddleAngleFilt - hapt_paddlePrevPos) / dt;
+        hapt_paddleSpeedFilt = hapt_LowPassFilter(hapt_paddleSpeedFilt,
+                                                  hapt_paddleSpeed, dt,
+                                                  filterCutoffFreqSpeed);
+
+        hapt_paddleAccel = (hapt_paddleSpeedFilt - hapt_paddlePrevSpeed) / dt;
+
+
+        hapt_motorTorque = 0.0f ;
+        //gravity
+        hapt_motorTorque += MGL * (float32_t)sin(hapt_paddleAngle * PI/180.f ) / REDUCTION_RATIO;
+
+        // compensate for viscous friction
+        hapt_motorTorque +=  copysign(1.0, hapt_paddleSpeedFilt) * (VISCOUS_FRICTION * abs(hapt_paddleSpeedFilt) + DRY_FRICTION_NEG)/ REDUCTION_RATIO;
+
+
+        //PID1
+        PID_errorPos = (hapt_paddleAngleFilt - hapt_paddleSetAngle);
+
+        PID_integrator = PID_integrator + dt *PID_errorPos;
+
+        utils_SaturateF(&PID_integrator, -0.3, 0.3); // prevent the integrator from exploding
+
+        float32_t PID_derror = PID_errorPos - PID_errorPosPrev;
+
+        PID_errorPosPrev = PID_errorPos;
+
+        PID_derivative = PID_derror/dt;
+
+        float32_t hapt_motorTorqueUnsat = -1*(PID_kp * PID_errorPos + PID_ki * PID_integrator + PID_kd * PID_derivative);
+        //saturation of the motor torque
+        if (hapt_motorTorqueUnsat > NOMINAL_TORQUE){
+            hapt_motorTorque = NOMINAL_TORQUE;
+        } else if (hapt_motorTorqueUnsat < -1*NOMINAL_TORQUE){
+            hapt_motorTorque = -1*NOMINAL_TORQUE;
+        } else {
+            hapt_motorTorque = hapt_motorTorqueUnsat;
+        }
+
+        //anti-windup for integrator
+        if (PID_ki != 0) {
+            PID_integrator = PID_integrator + dt/PID_ki * (hapt_motorTorque - hapt_motorTorqueUnsat);
+        }
+        else{
+            hapt_motorTorque=0.0f;
+        }
 	}
-
-	// saturation
-	if (hapt_motorTorque > NOMINAL_TORQUE){
-		hapt_motorTorque = NOMINAL_TORQUE;
-	} else if (hapt_motorTorque < -1*NOMINAL_TORQUE){
-		hapt_motorTorque = -1*NOMINAL_TORQUE;
-	}
-
-
-	// No torque applied
-	if (hapt_compensation_on == 0  && wall_on == 0){
-		hapt_motorTorque = 0.0f;
-	}
-	hapt_motorTorque = 0.0f;
 
 	torq_SetTorque(hapt_motorTorque);
 	hapt_paddlePrevPos = hapt_paddleAngle;
+    hapt_paddlePrevSpeed = hapt_paddleSpeed;
 
 }
 
@@ -360,6 +489,17 @@ void fft(cplx buf[], uint32_t n)
 
 }
 
+float32_t remapmine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat) {
+  float32_t temp =  (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+  if (sat) {
+      if (temp > out_max )
+          temp = out_max;
 
+      if (temp < out_min )
+          temp = out_min ;
+
+  }
+  return temp;
+}
 
 

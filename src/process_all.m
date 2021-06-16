@@ -40,8 +40,8 @@ for n = (1: shape(1))
     
 end
 %% raw signal 
-energy_frequency_domain(0, all_rest, 1)
-figure()
+% energy_frequency_domain(0, all_rest, 1)
+% figure()
 energy_frequency_domain(1, all_activate, 1)
 
 %% filtering 
