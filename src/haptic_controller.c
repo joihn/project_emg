@@ -99,7 +99,7 @@ volatile float32_t filterCutoffFreqAngle = 10.0f; // Cutoff frequency for the po
 const float32_t filterCutoffFreqSpeed = 200.0f; // Cutoff frequency for the speed filter [Hz].
 const float32_t filterCutoffFreqAccel = 10.0f; // Cutoff frequency for the acceleration filter [Hz].
 
-
+volatile float32_t previousTmp = 0; // Cutoff frequency for the acceleration filter [Hz].
 
 volatile float32_t PID_kp = 0.015;	//0.01		0.022
 volatile float32_t PID_ki = 0.15;	//0.003		0.015
@@ -135,8 +135,8 @@ volatile float32_t filtered_value_Prev_Prev;
 volatile float32_t actual_value;
 
 volatile float32_t amplifier_value;
-volatile float32_t amplifier_value_Prev;
-volatile float32_t amplifier_value_Prev_Prev;
+volatile float32_t muscle_value_filt_Prev;
+volatile float32_t muscle_value_filt_Prev_Prev;
 
 
 volatile float32_t sum_value;
@@ -155,9 +155,9 @@ float32_t hapt_LowPassFilter(float32_t previousFilteredValue,
 							 float32_t input, float32_t dt,
 							 float32_t cutoffFreq);
 
-float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,
+float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input, float32_t previousInput,
 							 float32_t dt, float32_t cutoffFreq);
-float32_t remapmine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat);
+float32_t remapMine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat);
 
 void _fft(cplx buf[], cplx out[], uint32_t n, uint32_t step);
 void fft(cplx buf[], uint32_t n);
@@ -240,6 +240,7 @@ void hapt_Init(void)
     comm_monitorBool("Notch filter on", (bool*)&notch_filter, READWRITE);
     comm_monitorFloat("paddle_set_pos [deg]", (float32_t*)&hapt_paddleSetAngle, READWRITE);
     comm_monitorBool("Position control", (bool*)&positionControl, READWRITE);
+    comm_monitorBool("muscle_value_filt", (float32_t*)&muscle_value_filt, READWRITE);
     comm_monitorFloat("filtered_value", (float32_t*)&filtered_value, READONLY);
     comm_monitorFloat("muscleOutput", (float32_t*)&muscleOutput, READONLY);
 }
@@ -292,25 +293,25 @@ void hapt_Update()
 		float32_t tmp = hapt_LowPassFilter(muscle_value_filt, amplifier_value,
 											dt, 500);
 
-		muscle_value_filt = hapt_HighPassFilter(muscle_value_filt, tmp,
+		muscle_value_filt = hapt_HighPassFilter(muscle_value_filt, tmp, previousTmp,
 												dt, 10);
-
+        previousTmp = tmp;
 
 		//implement notch filter
 		if (notch_filter == 1){
-			filtered_value = A0 * amplifier_value + A1 * amplifier_value_Prev + A2 * amplifier_value_Prev_Prev + \
+			filtered_value = A0 * muscle_value_filt + A1 * muscle_value_filt_Prev + A2 * muscle_value_filt_Prev_Prev + \
 							 B1 * filtered_value_Prev + B2 * filtered_value_Prev_Prev;
 
 			filtered_value_Prev = filtered_value;
 			filtered_value_Prev_Prev = filtered_value_Prev;
 
-			amplifier_value_Prev = amplifier_value;
-			amplifier_value_Prev_Prev = amplifier_value_Prev;
+            muscle_value_filt_Prev = muscle_value_filt;
+            muscle_value_filt_Prev_Prev = muscle_value_filt_Prev;
 
 		} else {
 			filtered_value = muscle_value_filt;
 		}
-        filtered_value = filtered_value - 1.2283f; // detrending
+        //filtered_value = filtered_value - 1.2283f; // detrending
 		muscle_value[iteration] = pow(filtered_value, 2);
 		actual_value = muscle_value[iteration];
 
@@ -324,7 +325,7 @@ void hapt_Update()
         //do some more processing on it
         muscleOutput = hapt_LowPassFilter( muscleOutput,
                                            energy_fft, dt,
-                                                  10);
+                                                  1.5);
 
 
 
@@ -378,7 +379,7 @@ void hapt_Update()
 
 
 
-        hapt_paddleSetAngle = remapmine(muscleOutput, 0.007f, 0.15f, -22.0f, +22.0f, true);
+        hapt_paddleSetAngle = remapMine(muscleOutput, 0.007f, 0.17f, -27.0f, +27.0f, true);
 
 	    /// filtering
         hapt_paddleAngleFilt = hapt_LowPassFilter(hapt_paddleAngleFilt,
@@ -456,12 +457,12 @@ float32_t hapt_LowPassFilter(float32_t previousFilteredValue, float32_t input,
 	return alpha * input + (1.0f - alpha) * previousFilteredValue;
 }
 
-float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,
+float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,  float32_t previousInput,
 							 float32_t dt, float32_t cutoffFreq)
 {
 	float32_t tau = 1.0f / (2.0f * PI * cutoffFreq); // Rise time (time to reach 63% of the steady-state value).
 	float32_t alpha = tau / (tau+dt); // Smoothing factor.
-	return alpha * input + (1.0f - alpha) * previousFilteredValue;
+	return alpha * previousFilteredValue + alpha * (input - previousInput);
 }
 
 
@@ -489,7 +490,7 @@ void fft(cplx buf[], uint32_t n)
 
 }
 
-float32_t remapmine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat) {
+float32_t remapMine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat) {
   float32_t temp =  (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
   if (sat) {
       if (temp > out_max )
