@@ -134,7 +134,7 @@ volatile float32_t filtered_value_Prev;
 volatile float32_t filtered_value_Prev_Prev;
 volatile float32_t actual_value;
 
-volatile float32_t amplifier_value;
+volatile float32_t amplifier_value =0;
 volatile float32_t muscle_value_filt_Prev;
 volatile float32_t muscle_value_filt_Prev_Prev;
 
@@ -236,12 +236,15 @@ void hapt_Init(void)
     comm_monitorUint32("iteration", (uint32_t*)&iteration, READONLY);
     comm_monitorFloat("Actual value", (float32_t*)&actual_value, READONLY);
     comm_monitorBool("FFT on", (bool*)&fft_on, READWRITE);
-    comm_monitorFloat("Energy FFT", (float32_t*)&energy_fft, READONLY);
     comm_monitorBool("Notch filter on", (bool*)&notch_filter, READWRITE);
     comm_monitorFloat("paddle_set_pos [deg]", (float32_t*)&hapt_paddleSetAngle, READWRITE);
     comm_monitorBool("Position control", (bool*)&positionControl, READWRITE);
+    comm_monitorBool("amplifier_value", (bool*)&amplifier_value, READWRITE);
+
     comm_monitorBool("muscle_value_filt", (float32_t*)&muscle_value_filt, READWRITE);
     comm_monitorFloat("filtered_value", (float32_t*)&filtered_value, READONLY);
+    comm_monitorFloat("Energy FFT", (float32_t*)&energy_fft, READONLY);
+
     comm_monitorFloat("muscleOutput", (float32_t*)&muscleOutput, READONLY);
 }
 
@@ -325,7 +328,7 @@ void hapt_Update()
         //do some more processing on it
         muscleOutput = hapt_LowPassFilter( muscleOutput,
                                            energy_fft, dt,
-                                                  1.5);
+                                                  3);
 
 
 
@@ -379,7 +382,7 @@ void hapt_Update()
 
 
 
-        hapt_paddleSetAngle = remapMine(muscleOutput, 0.007f, 0.17f, -27.0f, +27.0f, true);
+        hapt_paddleSetAngle = remapMine(muscleOutput, 0.007f, 0.15f, -27.0f, +27.0f, true);
 
 	    /// filtering
         hapt_paddleAngleFilt = hapt_LowPassFilter(hapt_paddleAngleFilt,

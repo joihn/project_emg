@@ -40,8 +40,8 @@ for n = (1: shape(1))
     
 end
 %% raw signal 
-% energy_frequency_domain(0, all_rest, 1)
-% figure()
+energy_frequency_domain(0, all_rest, 1)
+figure()
 energy_frequency_domain(1, all_activate, 1)
 
 %% filtering 
@@ -86,11 +86,15 @@ function energy = energy_frequency_domain(choice, value, plot_energy)
 %         plot(f,P2_smoothed)
         plot(f,P1_smoothed)
         xlim([0 500]);
-        ylim([0, 7e-3]);
-        set_title = sprintf('%d Spectrum, enegy : %d', choice, energy);
-        title(set_title)
-        xlabel('f (Hz)')
-        ylabel('|P2(f)|')
+        ylim([0, 2e-3]);
+        if choice==0
+            set_title = sprintf('Power spectrum at rest');
+        else
+            set_title = sprintf('Power spectrum during muscle activation');
+        end
+            title(set_title)
+        xlabel('f [Hz]')
+        ylabel('Magnitude')
     end
 
 end
