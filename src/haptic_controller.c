@@ -25,20 +25,13 @@
 #include "torque_regulator.h"
 #include "math.h"
 #include "stdlib.h"
-//#include "arm_math.h"
 
-// for FFT functions
-#include "stdio.h"
-#include "complex.h"
-typedef double complex cplx;
 
-// for FFT functions
-
-#define PADDLE_ID 16
 
 
 #define DEFAULT_HAPTIC_CONTROLLER_PERIOD 350 // Default control loop period [us].
 #define NOMINAL_TORQUE 0.021f
+#define PADDLE_ID 16
 
 #if (PADDLE_ID == 16)
 	#define DRY_FRICTION_POS 0.0007f
@@ -64,6 +57,7 @@ typedef double complex cplx;
 #define A2 0.9989f
 #define B1 1.9854f
 #define B2 -0.9975f
+#define CALIB_SAMP 6000 //N sample to take for calibration
 
 volatile uint32_t hapt_timestamp; // Time base of the controller, also used to timestamp the samples sent by streaming [us].
 volatile float32_t hapt_hallVoltage; // Hall sensor output voltage [V].
@@ -122,7 +116,7 @@ volatile bool hapt_compensation_on;
 volatile float32_t wall_K;
 volatile float32_t wall_B;
 
-volatile bool fft_on;
+
 volatile bool std_on;
 volatile bool notch_filter;
 
@@ -147,7 +141,13 @@ volatile float32_t energy_fft;
 
 volatile float32_t energy_std;
 volatile uint32_t iteration;
+volatile bool calib_rest=0;
+volatile bool calib_contract=0;
+volatile float64_t calib_sum = 0.0f;
+volatile int32_t j_calib=0;
 
+volatile float32_t rms_rest = 0.007f; // Value for Maxime, can be calibrated using the built in feature
+volatile float32_t rms_contract = 0.15f;
 
 void hapt_Update(void);
 
@@ -157,10 +157,9 @@ float32_t hapt_LowPassFilter(float32_t previousFilteredValue,
 
 float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input, float32_t previousInput,
 							 float32_t dt, float32_t cutoffFreq);
-float32_t remapMine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat);
+float32_t remapF(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat);
 
-void _fft(cplx buf[], cplx out[], uint32_t n, uint32_t step);
-void fft(cplx buf[], uint32_t n);
+
 
 
 /**
@@ -181,7 +180,6 @@ void hapt_Init(void)
 	wall_K = 0.005f; //go down to 0.00005 when no muscle force detected 	//0.01f;
 	wall_B = 0.0f; 															//0.003f;
 
-	fft_on = 1;
 	std_on = 0;
 	notch_filter = 1;
 
@@ -197,7 +195,7 @@ void hapt_Init(void)
 	filtered_value_Prev_Prev = 0.0f;
 
     filtered_value = 0.0f;
-	///////////////PID
+	//PID
     hapt_motorTorque = 0.0f;
     hapt_paddlePrevPos = 0.0f;
     hapt_paddlePrevSpeed = 0.0f;
@@ -213,7 +211,10 @@ void hapt_Init(void)
     PID_integrator = 0.0f;
     PID_derivative = 0.0f;
     positionControl = 0;
-	///////////
+    calib_rest = 0;
+    calib_contract = 0;
+
+
 
     // Make the timers call the update function periodically.
     cbt_SetHapticControllerTimer(hapt_Update, DEFAULT_HAPTIC_CONTROLLER_PERIOD);
@@ -222,11 +223,9 @@ void hapt_Init(void)
     comm_monitorUint32Func("timestep [us]", cbt_GetHapticControllerPeriod, cbt_SetHapticControllerPeriod);
     comm_monitorFloat("motor_torque [N.m]", (float32_t*)&hapt_motorTorque, READWRITE);
     comm_monitorBool("Compensation", (bool*)&hapt_compensation_on, READWRITE);
-//    comm_monitorFloat("paddle_speed [deg/s]", (float32_t*)&hapt_paddleSpeed, READONLY);
     comm_monitorFloat("hall_voltage [V]", (float32_t*)&hapt_hallVoltage, READONLY);
     comm_monitorFloat("paddle_pos [deg]", (float32_t*)&hapt_paddleAngle, READONLY);
     comm_monitorFloat("paddle_speed_filt [deg/s]", (float32_t*)&hapt_paddleSpeedFilt, READONLY);
-//    comm_monitorFloat("paddle_accel_filt [deg/s^2]", (float32_t*)&hapt_paddleAccelFilt, READONLY);
 
     comm_monitorBool("Wall", (bool*)&wall_on, READWRITE);
     comm_monitorFloat("Virtual Spring", (float32_t*)&wall_K, READWRITE);
@@ -235,7 +234,7 @@ void hapt_Init(void)
     comm_monitorFloat("Muscle value", (float32_t*)&muscle_value[iteration], READONLY);
     comm_monitorUint32("iteration", (uint32_t*)&iteration, READONLY);
     comm_monitorFloat("Actual value", (float32_t*)&actual_value, READONLY);
-    comm_monitorBool("FFT on", (bool*)&fft_on, READWRITE);
+
     comm_monitorBool("Notch filter on", (bool*)&notch_filter, READWRITE);
     comm_monitorFloat("paddle_set_pos [deg]", (float32_t*)&hapt_paddleSetAngle, READWRITE);
     comm_monitorBool("Position control", (bool*)&positionControl, READWRITE);
@@ -246,6 +245,13 @@ void hapt_Init(void)
     comm_monitorFloat("Energy FFT", (float32_t*)&energy_fft, READONLY);
 
     comm_monitorFloat("muscleOutput", (float32_t*)&muscleOutput, READONLY);
+
+
+    comm_monitorBool("calib_rest", (float32_t*)&calib_rest, READWRITE);
+    comm_monitorBool("calib_contract", (float32_t*)&calib_contract, READWRITE);
+    comm_monitorFloat("rms_rest", (float32_t*)&rms_rest, READONLY);
+    comm_monitorFloat("rms_contract", (float32_t*)&rms_contract, READONLY);
+
 }
 
 
@@ -255,8 +261,6 @@ void hapt_Init(void)
   */
 void hapt_Update()
 {
-
-
 	// Get the value of the amplifier
 	amplifier_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
 
@@ -277,65 +281,78 @@ void hapt_Update()
 											  hapt_paddleSpeed, dt,
 											  filterCutoffFreqSpeed);
 
-//	memmove(&muscle_value[0], &muscle_value[1], (N_SAMPLES - 1) * sizeof(muscle_value[0]));
-//	muscle_value[N_SAMPLES - 1] = hapt_hallVoltage * (-25.78f) + 63.39f;
 
 
-	iteration = ((iteration + 1) % N_SAMPLES);
+	// _________RMS computation___________
+    iteration = ((iteration + 1) % N_SAMPLES);
+	float32_t mean = 0.0f;
+    float32_t tmp = hapt_LowPassFilter(muscle_value_filt, amplifier_value,
+                                        dt, 500);
 
+    muscle_value_filt = hapt_HighPassFilter(muscle_value_filt, tmp, previousTmp,
+                                            dt, 10);
+    previousTmp = tmp;
 
-	if (fft_on == 0){
-		actual_value = amplifier_value;
+    //implement notch filter
+    if (notch_filter == 1){
+        filtered_value = A0 * muscle_value_filt + A1 * muscle_value_filt_Prev + A2 * muscle_value_filt_Prev_Prev + \
+                         B1 * filtered_value_Prev + B2 * filtered_value_Prev_Prev;
 
-	}
+        filtered_value_Prev = filtered_value;
+        filtered_value_Prev_Prev = filtered_value_Prev;
 
+        muscle_value_filt_Prev = muscle_value_filt;
+        muscle_value_filt_Prev_Prev = muscle_value_filt_Prev;
 
-	if (fft_on == 1){
-		float32_t mean = 0.0f;
-		//float32_t filtered_value = 0.0f;
-		float32_t tmp = hapt_LowPassFilter(muscle_value_filt, amplifier_value,
-											dt, 500);
+    } else {
+        filtered_value = muscle_value_filt;
+    }
 
-		muscle_value_filt = hapt_HighPassFilter(muscle_value_filt, tmp, previousTmp,
-												dt, 10);
-        previousTmp = tmp;
-
-		//implement notch filter
-		if (notch_filter == 1){
-			filtered_value = A0 * muscle_value_filt + A1 * muscle_value_filt_Prev + A2 * muscle_value_filt_Prev_Prev + \
-							 B1 * filtered_value_Prev + B2 * filtered_value_Prev_Prev;
-
-			filtered_value_Prev = filtered_value;
-			filtered_value_Prev_Prev = filtered_value_Prev;
-
-            muscle_value_filt_Prev = muscle_value_filt;
-            muscle_value_filt_Prev_Prev = muscle_value_filt_Prev;
-
-		} else {
-			filtered_value = muscle_value_filt;
-		}
-        //filtered_value = filtered_value - 1.2283f; // detrending
-		muscle_value[iteration] = pow(filtered_value, 2);
-		actual_value = muscle_value[iteration];
+    muscle_value[iteration] = pow(filtered_value, 2);
+    actual_value = muscle_value[iteration];
 
 
 
-		//add last value and remove value (WINDOW_SIZE + 1) before
-		sum_value += muscle_value[iteration];
-		sum_value -= muscle_value[(iteration - (WINDOW_SIZE + 1))% N_SAMPLES];
-		mean = sum_value / WINDOW_SIZE;
-		energy_fft = pow(mean, 0.5); //sqrt
-        //do some more processing on it
-        muscleOutput = hapt_LowPassFilter( muscleOutput,
-                                           energy_fft, dt,
-                                                  3);
+    //add last value and remove value (WINDOW_SIZE + 1) before
+    sum_value += muscle_value[iteration];
+    sum_value -= muscle_value[(iteration - (WINDOW_SIZE + 1))% N_SAMPLES];
+    mean = sum_value / WINDOW_SIZE;
+    energy_fft = pow(mean, 0.5); //sqrt
+    //do some more processing on it
+    muscleOutput = hapt_LowPassFilter( muscleOutput,
+                                       energy_fft, dt,
+                                              3);
 
 
-
+    //// calibration for each user
+    if (calib_rest){
+        calib_sum += muscleOutput;
+        j_calib+=1;
+        if (j_calib==CALIB_SAMP){
+            //compute mean
+            rms_rest = calib_sum/CALIB_SAMP;
+            //clean
+            j_calib=0;
+            calib_sum=0.0f;
+            calib_rest =0;
+        }
+    }
+    if (calib_contract){
+        calib_sum += muscleOutput;
+        j_calib+=1;
+        if (j_calib==CALIB_SAMP){
+            //compute mean
+            rms_contract = calib_sum/CALIB_SAMP;
+            //clean
+            j_calib=0;
+            calib_sum=0.0f;
+            calib_contract =0;
+        }
     }
 
 
-	// Compute the motor torque compensation, and apply it.
+
+	//// Compute the motor torque compensation, and apply it.
 	if (hapt_compensation_on ==1){
 		hapt_motorTorque=0;
 		//compensate for gravity
@@ -354,35 +371,9 @@ void hapt_Update()
 
 
 
-	bool wall = 0;
-	if (wall) {        // apply a virtual wall
-        if (wall_on == 1) {
-            if (hapt_paddleAngle > WALL_ANGLE_POS) {
-                hapt_motorTorque += wall_K * (WALL_ANGLE_POS - hapt_paddleAngle) - wall_B * hapt_paddleSpeedFilt;
-            } else if (hapt_paddleAngle < WALL_ANGLE_NEG) {
-                hapt_motorTorque += wall_K * (WALL_ANGLE_NEG - hapt_paddleAngle) - wall_B * hapt_paddleSpeedFilt;
-            }
-
-        }
-
-        // saturation
-        if (hapt_motorTorque > NOMINAL_TORQUE) {
-            hapt_motorTorque = NOMINAL_TORQUE;
-        } else if (hapt_motorTorque < -1 * NOMINAL_TORQUE) {
-            hapt_motorTorque = -1 * NOMINAL_TORQUE;
-        }
-
-        // No torque applied
-        if (hapt_compensation_on ==10 && wall_on == 0) {
-            hapt_motorTorque = 0.0f;
-        }
-    }
-
 	if (positionControl){
 
-
-
-        hapt_paddleSetAngle = remapMine(muscleOutput, 0.007f, 0.15f, -27.0f, +27.0f, true);
+        hapt_paddleSetAngle = remapF(muscleOutput, rms_rest, rms_contract, -25.0f, +25.0f, true);
 
 	    /// filtering
         hapt_paddleAngleFilt = hapt_LowPassFilter(hapt_paddleAngleFilt,
@@ -470,30 +461,9 @@ float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input, 
 
 
 
-void _fft(cplx buf[], cplx out[], uint32_t n, uint32_t step)
-{
-	if (step < n) {
-		_fft(out, buf, n, step * 2);
-		_fft(out + step, buf + step, n, step * 2);
 
-		for (int i = 0; i < n; i += 2 * step) {
-			cplx t = cexp(-I * PI * i / n) * out[i + step];
-			buf[i / 2]     = out[i] + t;
-			buf[(i + n)/2] = out[i] - t;
-		}
-	}
-}
-
-void fft(cplx buf[], uint32_t n)
-{
-	cplx out[n];
-	for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
-
-	_fft(buf, out, n, 1);
-
-}
-
-float32_t remapMine(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat) {
+float32_t remapF(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat) {
+//// remap from one range to another
   float32_t temp =  (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
   if (sat) {
       if (temp > out_max )

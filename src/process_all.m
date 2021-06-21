@@ -88,9 +88,9 @@ function energy = energy_frequency_domain(choice, value, plot_energy)
         xlim([0 500]);
         ylim([0, 2e-3]);
         if choice==0
-            set_title = sprintf('Power spectrum at rest');
+            set_title = sprintf('Power spectrum at rest %d', energy);
         else
-            set_title = sprintf('Power spectrum during muscle activation');
+            set_title = sprintf('Power spectrum during muscle activation %d', energy);
         end
             title(set_title)
         xlabel('f [Hz]')
