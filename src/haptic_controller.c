@@ -26,9 +26,6 @@
 #include "math.h"
 #include "stdlib.h"
 
-
-
-
 #define DEFAULT_HAPTIC_CONTROLLER_PERIOD 350 // Default control loop period [us].
 #define NOMINAL_TORQUE 0.021f
 #define PADDLE_ID 16
@@ -86,9 +83,6 @@ volatile float32_t hapt_paddleSpeedFilt; // Filtered paddle speed [deg/s].
 volatile float32_t hapt_paddleAccelFilt; // Filtered paddle acceleration [deg/s].
 volatile float32_t hapt_motorTorque; // Motor torque [N.m].
 
-
-
-
 volatile float32_t filterCutoffFreqAngle = 10.0f; // Cutoff frequency for the position filter [Hz].
 const float32_t filterCutoffFreqSpeed = 200.0f; // Cutoff frequency for the speed filter [Hz].
 const float32_t filterCutoffFreqAccel = 10.0f; // Cutoff frequency for the acceleration filter [Hz].
@@ -101,13 +95,10 @@ volatile float32_t PID_kd = 0.0006; //0.0008	0.00055
 
 volatile float32_t PID_tau_i = 0.1;
 
-
 volatile float32_t PID_errorPos;
 volatile float32_t PID_errorPosPrev;
 volatile float32_t PID_integrator;
 volatile float32_t PID_derivative;
-
-
 
 volatile bool positionControl;
 
@@ -115,7 +106,6 @@ volatile bool wall_on;
 volatile bool hapt_compensation_on;
 volatile float32_t wall_K;
 volatile float32_t wall_B;
-
 
 volatile bool std_on;
 volatile bool notch_filter;
@@ -159,15 +149,11 @@ float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input, 
 							 float32_t dt, float32_t cutoffFreq);
 float32_t remapF(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat);
 
-
-
-
 /**
   * @brief Initializes the haptic controller.
   */
 void hapt_Init(void)
 {
-
 	hapt_timestamp = 0;
 	hapt_motorTorque = 0.0f;
 
@@ -177,8 +163,8 @@ void hapt_Init(void)
 	hapt_compensation_on = 0;
 	wall_on = 0;
 
-	wall_K = 0.005f; //go down to 0.00005 when no muscle force detected 	//0.01f;
-	wall_B = 0.0f; 															//0.003f;
+	wall_K = 0.005f;
+	wall_B = 0.0f;
 
 	std_on = 0;
 	notch_filter = 1;
@@ -214,8 +200,6 @@ void hapt_Init(void)
     calib_rest = 0;
     calib_contract = 0;
 
-
-
     // Make the timers call the update function periodically.
     cbt_SetHapticControllerTimer(hapt_Update, DEFAULT_HAPTIC_CONTROLLER_PERIOD);
 
@@ -226,7 +210,6 @@ void hapt_Init(void)
     comm_monitorFloat("hall_voltage [V]", (float32_t*)&hapt_hallVoltage, READONLY);
     comm_monitorFloat("paddle_pos [deg]", (float32_t*)&hapt_paddleAngle, READONLY);
     comm_monitorFloat("paddle_speed_filt [deg/s]", (float32_t*)&hapt_paddleSpeedFilt, READONLY);
-
     comm_monitorBool("Wall", (bool*)&wall_on, READWRITE);
     comm_monitorFloat("Virtual Spring", (float32_t*)&wall_K, READWRITE);
     comm_monitorFloat("Virtual Damping", (float32_t*)&wall_B, READWRITE);
@@ -234,28 +217,19 @@ void hapt_Init(void)
     comm_monitorFloat("Muscle value", (float32_t*)&muscle_value[iteration], READONLY);
     comm_monitorUint32("iteration", (uint32_t*)&iteration, READONLY);
     comm_monitorFloat("Actual value", (float32_t*)&actual_value, READONLY);
-
     comm_monitorBool("Notch filter on", (bool*)&notch_filter, READWRITE);
     comm_monitorFloat("paddle_set_pos [deg]", (float32_t*)&hapt_paddleSetAngle, READWRITE);
     comm_monitorBool("Position control", (bool*)&positionControl, READWRITE);
     comm_monitorBool("amplifier_value", (bool*)&amplifier_value, READWRITE);
-
     comm_monitorBool("muscle_value_filt", (float32_t*)&muscle_value_filt, READWRITE);
     comm_monitorFloat("filtered_value", (float32_t*)&filtered_value, READONLY);
     comm_monitorFloat("Energy FFT", (float32_t*)&energy_fft, READONLY);
-
     comm_monitorFloat("muscleOutput", (float32_t*)&muscleOutput, READONLY);
-
-
     comm_monitorBool("calib_rest", (float32_t*)&calib_rest, READWRITE);
     comm_monitorBool("calib_contract", (float32_t*)&calib_contract, READWRITE);
     comm_monitorFloat("rms_rest", (float32_t*)&rms_rest, READONLY);
     comm_monitorFloat("rms_contract", (float32_t*)&rms_contract, READONLY);
-
 }
-
-
-
 /**
   * @brief Updates the haptic controller state.
   */
@@ -280,8 +254,6 @@ void hapt_Update()
 	hapt_paddleSpeedFilt = hapt_LowPassFilter(hapt_paddleSpeedFilt,
 											  hapt_paddleSpeed, dt,
 											  filterCutoffFreqSpeed);
-
-
 
 	// _________RMS computation___________
     iteration = ((iteration + 1) % N_SAMPLES);
@@ -311,8 +283,6 @@ void hapt_Update()
     muscle_value[iteration] = pow(filtered_value, 2);
     actual_value = muscle_value[iteration];
 
-
-
     //add last value and remove value (WINDOW_SIZE + 1) before
     sum_value += muscle_value[iteration];
     sum_value -= muscle_value[(iteration - (WINDOW_SIZE + 1))% N_SAMPLES];
@@ -322,7 +292,6 @@ void hapt_Update()
     muscleOutput = hapt_LowPassFilter( muscleOutput,
                                        energy_fft, dt,
                                               3);
-
 
     //// calibration for each user
     if (calib_rest){
@@ -350,8 +319,6 @@ void hapt_Update()
         }
     }
 
-
-
 	//// Compute the motor torque compensation, and apply it.
 	if (hapt_compensation_on ==1){
 		hapt_motorTorque=0;
@@ -368,8 +335,6 @@ void hapt_Update()
 			hapt_motorTorque +=  -1*DRY_FRICTION_NEG ;// / REDUCTION_RATIO;
 		}
 	}
-
-
 
 	if (positionControl){
 
@@ -450,7 +415,14 @@ float32_t hapt_LowPassFilter(float32_t previousFilteredValue, float32_t input,
 	float32_t alpha = dt / (tau+dt); // Smoothing factor.
 	return alpha * input + (1.0f - alpha) * previousFilteredValue;
 }
-
+/**
+* @brief Filters a signal with a first-order low-pass filter.
+* @param previousFilteredValue the previous filtered value.
+* @param input the filter input (the current sample of the signal to filter).
+* @param dt the time elapsed since the last call of this function [s].
+* @param cutoffFreq the cutoff frequency of the filter [Hz].
+* @return the new output of the filter.
+*/
 float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input,  float32_t previousInput,
 							 float32_t dt, float32_t cutoffFreq)
 {
@@ -459,11 +431,8 @@ float32_t hapt_HighPassFilter(float32_t previousFilteredValue, float32_t input, 
 	return alpha * previousFilteredValue + alpha * (input - previousInput);
 }
 
-
-
-
 float32_t remapF(float32_t x, float32_t in_min, float32_t in_max, float32_t out_min, float32_t out_max, bool sat) {
-//// remap from one range to another
+//// remap from one range of values to another
   float32_t temp =  (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
   if (sat) {
       if (temp > out_max )
