@@ -27,11 +27,21 @@ hold on
 box on
 plot(time, testFile.Energy_FFT(index), 'DisplayName', 'Original RMS')
 plot(time, testFile.muscleOutput(index), 'DisplayName', 'Smoothed RMS')
+
+
 title("RMS value computed on a sliding windows of 0.35s")
 legend('Location','northwest')
 xlabel("Time [s]")
 ylabel("Magnitue")
 xlim([0, 9])
+hold off
+
+%% Paddle Angle computed via matlab, maybe we don't keep
+data = testFile.muscleOutput(index)
+paddleAngle = mapfun(data, 0, 0.2, -25, 25)
+
+plot(time+0.03, paddleAngle,'DisplayName', 'Paddle Angle computed via matlab')
+legend()
 
 %%
 
